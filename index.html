@@ -7,18 +7,21 @@
     --surface: #fcfcfb; --page: #f9f9f7; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10); --accent: #2a78d6; --critical: #d03b3b;
     --c-early: #cde2fb; --c-late: #0d366b; --c-future: #e1e0d9; --hull: #2a78d6; --hull-edge: #1c5cab;
+    --kw: #4a3aa7; --num: #eb6834; --bi: #1baf7a; --str: #008300; --cm: #898781;
   }
   @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
     --surface: #1a1a19; --page: #0d0d0d; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10); --accent: #3987e5; --critical: #e66767;
-    --c-early: #184f95; --c-late: #b7d3f6; --c-future: #383835; --hull: #3987e5; --hull-edge: #86b6ef;
+    --c-early: #3987e5; --c-late: #cde2fb; --c-future: #52514e; --hull: #3987e5; --hull-edge: #86b6ef;
+    --kw: #9085e9; --num: #eb6834; --bi: #1baf7a; --str: #0ca30c; --cm: #898781;
   } }
   :root[data-theme="dark"] {
     color-scheme: dark;
     --surface: #1a1a19; --page: #0d0d0d; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10); --accent: #3987e5; --critical: #e66767;
-    --c-early: #184f95; --c-late: #b7d3f6; --c-future: #383835; --hull: #3987e5; --hull-edge: #86b6ef;
+    --c-early: #3987e5; --c-late: #cde2fb; --c-future: #52514e; --hull: #3987e5; --hull-edge: #86b6ef;
+    --kw: #9085e9; --num: #eb6834; --bi: #1baf7a; --str: #0ca30c; --cm: #898781;
   }
   html, body { margin: 0; height: 100%; font: 14px system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--page); }
   body { display: grid; grid-template-columns: auto 6px 1fr; }
@@ -30,6 +33,10 @@
   label { color: var(--ink-2); font-size: 12px; }
   textarea, input[type=text] { width: 100%; box-sizing: border-box; font: 13px ui-monospace, Menlo, monospace; border: 1px solid var(--border); border-radius: 4px; padding: 8px; background: var(--surface); color: var(--ink); }
   textarea { height: 220px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
+  .editor { position: relative; }
+  .editor pre { position: absolute; inset: 0; margin: 0; padding: 8px; border: 1px solid transparent; font: 13px ui-monospace, Menlo, monospace; white-space: pre; overflow: hidden; tab-size: 4; pointer-events: none; color: var(--ink); }
+  .editor textarea { position: relative; display: block; background: transparent; color: transparent; caret-color: var(--ink); }
+  .kw { color: var(--kw); } .num { color: var(--num); } .bi { color: var(--bi); } .str { color: var(--str); } .cm { color: var(--cm); font-style: italic; }
   .row { display: flex; gap: 8px; align-items: center; }
   .row input[type=range] { flex: 1; }
   button { font: inherit; padding: 4px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); cursor: pointer; }
@@ -44,11 +51,11 @@
 <aside>
   <h1>polyviz <button id="theme" title="toggle light/dark">◐</button></h1>
   <label>Python loop nest (innermost body is replaced by a point record)</label>
-  <textarea id="code" spellcheck="false">N = 8
+  <div class="editor"><pre id="hl" aria-hidden="true"></pre><textarea id="code" spellcheck="false">N = 8
 for i in range(N):
     for j in range(i, N):
         for k in range(j - i + 1):
-            pass</textarea>
+            pass</textarea></div>
   <label>Schedule θ(iters) — comma-separated affine exprs, optional</label>
   <input id="sched" type="text" placeholder="e.g.  i, i + j, k" spellcheck="false">
   <div id="err"></div>
@@ -191,6 +198,15 @@ renderer.domElement.addEventListener('pointermove', e => {
   tip.style.display = 'block'; tip.style.left = (e.clientX - r.left + 12) + 'px'; tip.style.top = (e.clientY - r.top + 12) + 'px';
   tip.textContent = `(${data.names.join(', ')}) = (${p.join(', ')})  t=${i}` + (data.sched ? `  θ=(${data.sched[i].slice(0, data.names.length).join(', ')})` : '');
 });
+
+// syntax highlight: one regex pass (comment | string | keyword | builtin | number) painted into the <pre> behind the textarea
+const TOK = /(#.*)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|\b(for|in|if|elif|else|while|and|or|not|pass|True|False|None|def|return|lambda)\b|\b(range|min|max|abs|len|int)\b|\b(\d+)\b/g;
+function highlight() {
+  const ta = $('code'), esc = ta.value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  $('hl').innerHTML = esc.replace(TOK, (m, c, s, k, b, n) => `<span class="${c ? 'cm' : s ? 'str' : k ? 'kw' : b ? 'bi' : 'num'}">${m}</span>`) + '\n';
+  $('hl').scrollTop = ta.scrollTop; $('hl').scrollLeft = ta.scrollLeft;
+}
+$('code').addEventListener('input', highlight); $('code').addEventListener('scroll', highlight); highlight();
 
 // editor niceties: Tab inserts 4 spaces, Enter keeps (and after ':' grows) the indent
 $('code').addEventListener('keydown', e => {
