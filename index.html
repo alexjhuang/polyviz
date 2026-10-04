@@ -168,7 +168,8 @@ function build(d) {
   d.names.slice(0, 3).forEach((nm, k) => {
     const p = new THREE.Vector3(); p.setComponent(k, ext + 1.6); labels.push(textSprite(nm, p)); scene.add(labels.at(-1));
   });
-  if (!camera.userData.placed) { camera.position.set(ext * 1.6, ext * 1.3, ext * 2.2); controls.target.set(ext / 2, ext / 2, ext / 2); camera.userData.placed = true; }
+  // refit the camera only when the domain's extent changes, so orbiting survives edits/theme flips
+  if (camera.userData.ext !== ext) { camera.position.set(ext * 1.6, ext * 1.3, ext * 2.2); controls.target.set(ext / 2, ext / 2, ext / 2); camera.userData.ext = ext; }
   update();
 }
 
