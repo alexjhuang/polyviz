@@ -54,7 +54,7 @@
 </style>
 <aside>
   <h1>polyviz <button id="theme" title="toggle light/dark">◐</button></h1>
-  <label>Python loop nest — array reads/writes in the innermost body become dependence edges</label>
+  <label class="row" style="justify-content:space-between">Python loop nest — array reads/writes in the innermost body become dependence edges <button id="rand" title="random loop nest + schedule">🎲</button></label>
   <div class="editor"><pre id="hl" aria-hidden="true"></pre><textarea id="code" spellcheck="false"># in-place Gauss-Seidel sweeps: RAW within a sweep, WAR/WAW across sweeps
 T, N = 3, 6
 for t in range(T):
@@ -245,6 +245,36 @@ $('code').addEventListener('keydown', e => {
   } else return;
   ta.dispatchEvent(new Event('input'));
 });
+
+// random nest: 2-3 affine loops (triangular / parametric bounds), stencil body, permuted+skewed schedule.
+// Rejects empty/tiny domains and anything already shown this session.
+const pick = a => a[Math.floor(Math.random() * a.length)], seen = new Set();
+function randomNest() {
+  const names = ['i', 'j', 'k'].slice(0, pick([2, 3, 3])), N = pick([5, 6, 7, 8]);
+  const loops = names.map((v, d) => {
+    const outer = names.slice(0, d), o = outer.length ? pick(outer) : null;
+    const lo = pick(o ? ['0', '1', o, `${o} + 1`] : ['0', '1']), hi = pick(o ? ['N', `N - ${o}`, `${o} + 3`, `min(N, ${o} + 4)`] : ['N']);
+    return `${'    '.repeat(d)}for ${v} in range(${lo === '0' ? '' : lo + ', '}${hi}):`;
+  });
+  const idx = names.map(v => `[${v}]`).join(''), terms = new Set();
+  while (terms.size < pick([1, 2, 3])) {
+    const off = names.map(() => pick([-1, 0, 0, 1]));
+    if (off.some(x => x)) terms.add('A' + names.map((v, d) => `[${v}${off[d] > 0 ? '+1' : off[d] < 0 ? '-1' : ''}]`).join(''));
+  }
+  const body = `${'    '.repeat(names.length)}A${idx} = ${[...terms].join(' + ')}`;
+  const perm = [...names].sort(() => Math.random() - .5), sched = perm.map((v, d) => Math.random() < .4 && d + 1 < perm.length ? `${v} + ${perm[d + 1]}` : v);
+  if (sched.join() === names.join()) sched[0] = `${names[0]} + ${names[1]}`;  // never the identity: the morph should do something
+  return { code: [`N = ${N}`, ...loops, body].join('\n'), sched: sched.join(', ') };
+}
+$('rand').onclick = async () => {
+  for (let tries = 0; tries < 20; tries++) {
+    const { code, sched } = randomNest();
+    if (seen.has(code)) continue;
+    const d = await compute(code, sched);
+    if (d.error || d.points.length < 6) continue;
+    seen.add(code); $('code').value = code; $('sched').value = sched; highlight(); $('err').textContent = ''; build(d); return;
+  }
+};
 
 // live re-run (debounced)
 let timer;
