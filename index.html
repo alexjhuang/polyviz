@@ -3,15 +3,30 @@
 <title>polyviz — loop nest → polyhedron</title>
 <style>
   :root {
+    color-scheme: light;
     --surface: #fcfcfb; --page: #f9f9f7; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-    --grid: #e1e0d9; --border: rgba(11,11,11,.10); --accent: #2a78d6; --critical: #d03b3b;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10); --accent: #2a78d6; --critical: #d03b3b;
+    --c-early: #cde2fb; --c-late: #0d366b; --c-future: #e1e0d9; --hull: #2a78d6; --hull-edge: #1c5cab;
+  }
+  @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: #1a1a19; --page: #0d0d0d; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10); --accent: #3987e5; --critical: #e66767;
+    --c-early: #184f95; --c-late: #b7d3f6; --c-future: #383835; --hull: #3987e5; --hull-edge: #86b6ef;
+  } }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface: #1a1a19; --page: #0d0d0d; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10); --accent: #3987e5; --critical: #e66767;
+    --c-early: #184f95; --c-late: #b7d3f6; --c-future: #383835; --hull: #3987e5; --hull-edge: #86b6ef;
   }
   html, body { margin: 0; height: 100%; font: 14px system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--page); }
   body { display: grid; grid-template-columns: auto 6px 1fr; }
   #split { cursor: col-resize; background: var(--grid); }
   #split:hover, #split.on { background: var(--accent); }
   aside { box-sizing: border-box; width: 480px; min-width: 260px; max-width: 70vw; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; border-right: 1px solid var(--grid); background: var(--surface); }
-  h1 { font-size: 15px; margin: 0; }
+  h1 { font-size: 15px; margin: 0; display: flex; justify-content: space-between; align-items: center; }
+  h1 button { font-size: 12px; font-weight: normal; }
   label { color: var(--ink-2); font-size: 12px; }
   textarea, input[type=text] { width: 100%; box-sizing: border-box; font: 13px ui-monospace, Menlo, monospace; border: 1px solid var(--border); border-radius: 4px; padding: 8px; background: var(--surface); color: var(--ink); }
   textarea { height: 220px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
@@ -24,10 +39,10 @@
   canvas { display: block; }
   #tip { position: absolute; pointer-events: none; display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font: 12px ui-monospace, monospace; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
   #legend { position: absolute; left: 12px; bottom: 12px; color: var(--ink-2); font-size: 12px; display: flex; gap: 8px; align-items: center; }
-  #legend i { width: 80px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #cde2fb, #0d366b); display: inline-block; }
+  #legend i { width: 80px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--c-early), var(--c-late)); display: inline-block; }
 </style>
 <aside>
-  <h1>polyviz</h1>
+  <h1>polyviz <button id="theme" title="toggle light/dark">◐</button></h1>
   <label>Python loop nest (innermost body is replaced by a point record)</label>
   <textarea id="code" spellcheck="false">N = 8
 for i in range(N):
@@ -40,6 +55,7 @@ for i in range(N):
   <div id="stats"></div>
   <label>Execution time (lexicographic order of the original nest)</label>
   <div class="row"><button id="play">▶</button><input id="t" type="range" min="0" max="0" value="0"></div>
+  <div class="row"><label>speed <span id="speedv">1×</span></label><input id="speed" type="range" min="-2" max="3" step="0.1" value="0"></div>
   <label>Morph: original domain → scheduled domain</label>
   <div class="row"><input id="morph" type="range" min="0" max="1000" value="0"></div>
   <label><input id="hull" type="checkbox" checked> show convex hull</label>
@@ -59,15 +75,30 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(devicePixelRatio);
 view.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#fcfcfb');
+
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
 const controls = new OrbitControls(camera, renderer.domElement);
 scene.add(new THREE.AmbientLight(0xffffff, 1.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(3, 5, 4); scene.add(sun);
 
-const C_EARLY = new THREE.Color('#cde2fb'), C_LATE = new THREE.Color('#0d366b'), C_FUTURE = new THREE.Color('#e1e0d9');
+const C_EARLY = new THREE.Color(), C_LATE = new THREE.Color(), C_FUTURE = new THREE.Color();
 let data = null, pts = null, hullMesh = null, hullEdges = null, axes = null, labels = [];
 const _m = new THREE.Matrix4(), _c = new THREE.Color();
+
+// theme: CSS vars are the single source of truth; three.js pulls from them on (re)build
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function applyTheme() {
+  scene.background = new THREE.Color(cssVar('--surface'));
+  C_EARLY.set(cssVar('--c-early')); C_LATE.set(cssVar('--c-late')); C_FUTURE.set(cssVar('--c-future'));
+  if (data) build(data);
+}
+const saved = localStorage.getItem('theme'); if (saved) document.documentElement.dataset.theme = saved;
+$('theme').onclick = () => {
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches, cur = document.documentElement.dataset.theme || (dark ? 'dark' : 'light');
+  localStorage.setItem('theme', document.documentElement.dataset.theme = cur === 'dark' ? 'light' : 'dark'); applyTheme();
+};
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+applyTheme();
 
 function resize() {
   const w = view.clientWidth, h = view.clientHeight;
@@ -83,7 +114,7 @@ split.addEventListener('pointerup', () => split.classList.remove('on'));
 
 function textSprite(txt, pos) {
   const cv = document.createElement('canvas'); cv.width = 128; cv.height = 64;
-  const g = cv.getContext('2d'); g.font = '40px system-ui'; g.fillStyle = '#52514e'; g.textAlign = 'center'; g.fillText(txt, 64, 48);
+  const g = cv.getContext('2d'); g.font = '40px system-ui'; g.fillStyle = cssVar('--ink-2'); g.textAlign = 'center'; g.fillText(txt, 64, 48);
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), depthTest: false }));
   s.scale.set(1.2, 0.6, 1); s.position.copy(pos); return s;
 }
@@ -102,18 +133,19 @@ function posAt(i, m, out) {
 function build(d) {
   clear(); data = d;
   const n = d.points.length;
-  $('t').max = n; $('t').value = n;
+  const keep = data === d && +$('t').max === n ? +$('t').value : n;
+  $('t').max = n; $('t').value = keep;
   $('stats').textContent = `${n} iterations · dims (${d.names.join(', ')})${d.sched ? ' · schedule applied' : ''}`;
 
   pts = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 12, 8), new THREE.MeshStandardMaterial({ roughness: .6 }), n);
   scene.add(pts);
 
-  const hm = new THREE.MeshStandardMaterial({ color: '#2a78d6', transparent: true, opacity: .14, side: THREE.DoubleSide, depthWrite: false });
+  const hm = new THREE.MeshStandardMaterial({ color: cssVar('--hull'), transparent: true, opacity: .14, side: THREE.DoubleSide, depthWrite: false });
   hullMesh = new THREE.Mesh(new THREE.BufferGeometry(), hm); scene.add(hullMesh);
-  hullEdges = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#1c5cab', transparent: true, opacity: .6 })); scene.add(hullEdges);
+  hullEdges = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: cssVar('--hull-edge'), transparent: true, opacity: .6 })); scene.add(hullEdges);
 
   const ext = Math.max(1, ...d.points.flat(), ...(d.sched ? d.sched.flat() : []));
-  axes = new THREE.AxesHelper(ext + 1); axes.setColors('#c3c2b7', '#c3c2b7', '#c3c2b7'); scene.add(axes);
+  axes = new THREE.AxesHelper(ext + 1); const ax = cssVar('--axis'); axes.setColors(ax, ax, ax); scene.add(axes);
   d.names.slice(0, 3).forEach((nm, k) => {
     const p = new THREE.Vector3(); p.setComponent(k, ext + 1.6); labels.push(textSprite(nm, p)); scene.add(labels.at(-1));
   });
@@ -217,13 +249,17 @@ function blip(progress) {
   o.connect(g).connect(ac.destination); o.start(t0); o.stop(t0 + 0.08);
 }
 
-let playing = false;
+let playing = false, acc = 0;
+$('speed').addEventListener('input', e => $('speedv').textContent = (2 ** +e.target.value).toFixed(2).replace(/\.?0+$/, '') + '×');
 $('play').onclick = () => {
   playing = !playing; $('play').textContent = playing ? '❚❚' : '▶'; if (playing && +$('t').value >= +$('t').max) $('t').value = 0; };
 (function loop() {
   requestAnimationFrame(loop);
   if (playing && data) {
-    const t = $('t'); t.value = Math.min(+t.max, +t.value + Math.max(1, Math.round(+t.max / 300)));
+    // baseline: whole run in ~5 s at 60 fps; speed slider is log2 (0.25×–8×); fractional steps accumulate
+    const t = $('t'); acc += (+t.max / 300) * 2 ** +$('speed').value;
+    if (acc < 1) { controls.update(); renderer.render(scene, camera); return; }
+    t.value = Math.min(+t.max, +t.value + Math.floor(acc)); acc %= 1;
     blip(+t.value / +t.max);
     if (+t.value >= +t.max) { playing = false; $('play').textContent = '▶'; }
     update();
