@@ -11,6 +11,7 @@ import numpy as np
 from scipy.spatial import ConvexHull
 
 MAX_POINTS = 20000
+MAX_EDGES = 20000
 HERE = os.path.dirname(os.path.abspath(globals().get("__file__", "app.py")))  # no __file__ under Pyodide
 
 
@@ -30,24 +31,99 @@ def instrument(code):
         if not inner:
             break
         node = inner[0]
-    node.body = [ast.parse(f"_rec(({', '.join(names)},))").body[0]]
+    reads, writes = accesses(node.body)
+    node.body = [ast.parse(f"_rec(({', '.join(names)},))").body[0]]  # body is analyzed, never executed
     if isinstance(node, ast.If):
         node.orelse = []
     ast.fix_missing_locations(tree)
-    return names, compile(tree, "<nest>", "exec")
+    return names, compile(tree, "<nest>", "exec"), reads, writes
+
+
+def _flat(n):
+    """A[i-1][j] / A[i, j]  ->  ('A', [index exprs]) ; None if the base isn't a plain name."""
+    idx = []
+    while isinstance(n, ast.Subscript):
+        idx = (list(n.slice.elts) if isinstance(n.slice, ast.Tuple) else [n.slice]) + idx
+        n = n.value
+    return (n.id, idx) if isinstance(n, ast.Name) else None
+
+
+def accesses(body):
+    """Array reads/writes in the innermost body as (name, [index exprs]) — outermost subscripts only."""
+    reads, writes = [], []
+
+    class V(ast.NodeVisitor):
+        def visit_Subscript(self, n):
+            a = _flat(n)
+            if a is None:
+                return self.generic_visit(n)
+            (writes if isinstance(n.ctx, ast.Store) else reads).append(a)
+            for e in a[1]:
+                self.visit(e)  # indirect indices: A[B[i]] reads B
+
+        def visit_AugAssign(self, n):  # A[i] += x reads and writes A[i]
+            self.generic_visit(n)
+            a = _flat(n.target)
+            if a is not None:
+                reads.append(a)
+
+    for st in body:
+        V().visit(st)
+    return reads, writes
 
 
 def enumerate_points(code):
-    names, co = instrument(code)
-    pts = []
+    """Integer points of the domain plus dynamically traced dependence edges (src, dst, kind)."""
+    names, co, reads, writes = instrument(code)
+    ns = {"_rec": None, "range": range, "min": min, "max": max, "abs": abs}
+    # index lambdas share the exec namespace, so they see user parameters like N (late-bound)
+    mk = lambda acc: [(nm, eval(f"lambda {', '.join(names)}: ({', '.join(map(ast.unparse, idx))},)", ns)) for nm, idx in acc]
+    rd, wr = mk(reads), mk(writes)
+    pts, edges, last_write, readers = [], set(), {}, {}
 
     def _rec(p):
         pts.append(tuple(int(x) for x in p))
         if len(pts) > MAX_POINTS:
             raise RuntimeError(f"more than {MAX_POINTS} iterations; shrink the bounds")
+        cur = len(pts) - 1
+        for nm, f in rd:  # RHS first
+            cell = (nm, f(*p))
+            if cell in last_write and last_write[cell] != cur:
+                edges.add((last_write[cell], cur, "RAW"))
+            readers.setdefault(cell, []).append(cur)
+        for nm, f in wr:
+            cell = (nm, f(*p))
+            if cell in last_write and last_write[cell] != cur:
+                edges.add((last_write[cell], cur, "WAW"))
+            edges.update((r, cur, "WAR") for r in readers.pop(cell, ()) if r != cur)
+            last_write[cell] = cur
+        if len(edges) > MAX_EDGES:
+            raise RuntimeError(f"more than {MAX_EDGES} dependence edges; shrink the bounds")
 
-    exec(co, {"_rec": _rec, "range": range, "min": min, "max": max, "abs": abs})
-    return names, pts
+    ns["_rec"] = _rec
+    exec(co, ns)
+    return names, pts, sorted(edges)
+
+
+def transitive(edges, n):
+    """Mark edges implied by a longer path (transitive reduction over all kinds together).
+
+    Edges always go forward in iteration order, so a reverse sweep with int bitsets is enough.
+    """
+    succ = {}
+    for a, b, _ in edges:
+        succ.setdefault(a, set()).add(b)
+    reach = [0] * n  # reach[v]: bitset of nodes reachable from v (excluding v)
+    for v in range(n - 1, -1, -1):
+        for w in succ.get(v, ()):
+            reach[v] |= reach[w] | (1 << w)
+    red = {}
+    for v, ws in succ.items():
+        via = 0  # nodes reachable through at least one hop *then* more
+        for w in ws:
+            via |= reach[w]
+        red[v] = via
+    return [bool(red.get(a, 0) >> b & 1) for a, b, _ in edges]
 
 
 def pad3(pts):
@@ -73,9 +149,10 @@ def hull_faces(a):
 
 
 def run(code, schedule):
-    names, pts = enumerate_points(code)
+    names, pts, edges = enumerate_points(code)
     a = pad3(pts)
-    out = {"names": names, "points": a.tolist(), "faces": hull_faces(a)}
+    out = {"names": names, "points": a.tolist(), "faces": hull_faces(a),
+           "edges": [[s, d, k, t] for (s, d, k), t in zip(edges, transitive(edges, len(pts)))]}
     if schedule.strip():
         f = eval(f"lambda {', '.join(names)}: ({schedule},)", {})
         s = pad3([f(*p) for p in pts])
@@ -111,7 +188,18 @@ if __name__ == "__main__":
         assert r["faces"] and r["sched_faces"], r          # flat 2D domain still gets a hull
         assert r["sched"][-1][:2] == [3.0, 6.0], r["sched"][-1]
         r = run("for i in range(3):\n    for j in range(3):\n        if i != j:\n            pass\n", "")
-        assert len(r["points"]) == 6, r
+        assert len(r["points"]) == 6 and r["edges"] == [], r
+        # 2-D stencil: 12 flow deps, none transitive
+        r = run("N = 4\nfor i in range(1, N):\n    for j in range(1, N):\n        A[i][j] = A[i-1][j] + A[i][j-1]\n", "")
+        kinds = [e[2] for e in r["edges"]]
+        assert kinds.count("RAW") == 12 and len(kinds) == 12 and not any(e[3] for e in r["edges"]), r["edges"]
+        # fib: the i-2 edge is implied by two i-1 hops
+        r = run("for i in range(2, 5):\n    A[i] = A[i-1] + A[i-2]\n", "")
+        assert [e[3] for e in r["edges"]] == [False, True, False], r["edges"]
+        r = run("for i in range(3):\n    for j in range(3):\n        S[0] += B[i, j]\n", "")  # reduction: RAW+WAW chain
+        assert [e[2] for e in r["edges"]].count("RAW") == 8 and len(r["edges"]) == 16, r["edges"]
+        r = run("for i in range(4):\n    B[i] = A[i + 1]\n    A[i] = 0\n", "")  # anti deps only
+        assert [e[2] for e in r["edges"]] == ["WAR"] * 3, r["edges"]
         r = run("    N = 3\n    for i in range(N):\n\t\tfor j in range(N):\n\t\t\tpass\n", "")
         assert len(r["points"]) == 9, r
         print("ok")

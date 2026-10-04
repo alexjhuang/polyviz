@@ -8,6 +8,7 @@
     --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10); --accent: #2a78d6; --critical: #d03b3b;
     --c-early: #cde2fb; --c-late: #0d366b; --c-future: #e1e0d9; --hull: #2a78d6; --hull-edge: #1c5cab;
     --kw: #4a3aa7; --num: #eb6834; --bi: #1baf7a; --str: #008300; --cm: #898781;
+    --raw: #eb6834; --war: #1baf7a; --waw: #e87ba4; --bad: #d03b3b;
   }
   @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
@@ -15,6 +16,7 @@
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10); --accent: #3987e5; --critical: #e66767;
     --c-early: #3987e5; --c-late: #cde2fb; --c-future: #52514e; --hull: #3987e5; --hull-edge: #86b6ef;
     --kw: #9085e9; --num: #eb6834; --bi: #1baf7a; --str: #0ca30c; --cm: #898781;
+    --raw: #d95926; --war: #199e70; --waw: #d55181; --bad: #e66767;
   } }
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -22,6 +24,7 @@
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10); --accent: #3987e5; --critical: #e66767;
     --c-early: #3987e5; --c-late: #cde2fb; --c-future: #52514e; --hull: #3987e5; --hull-edge: #86b6ef;
     --kw: #9085e9; --num: #eb6834; --bi: #1baf7a; --str: #0ca30c; --cm: #898781;
+    --raw: #d95926; --war: #199e70; --waw: #d55181; --bad: #e66767;
   }
   html, body { margin: 0; height: 100%; font: 14px system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--page); }
   body { display: grid; grid-template-columns: auto 6px 1fr; }
@@ -46,11 +49,12 @@
   canvas { display: block; }
   #tip { position: absolute; pointer-events: none; display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font: 12px ui-monospace, monospace; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
   #legend { position: absolute; left: 12px; bottom: 12px; color: var(--ink-2); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  #legend b { width: 18px; height: 3px; border-radius: 2px; display: inline-block; margin: 0 4px 0 10px; }
   #legend i { width: 80px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--c-early), var(--c-late)); display: inline-block; }
 </style>
 <aside>
   <h1>polyviz <button id="theme" title="toggle light/dark">◐</button></h1>
-  <label>Python loop nest (innermost body is replaced by a point record)</label>
+  <label>Python loop nest — array reads/writes in the innermost body become dependence edges</label>
   <div class="editor"><pre id="hl" aria-hidden="true"></pre><textarea id="code" spellcheck="false">N = 8
 for i in range(N):
     for j in range(i, N):
@@ -67,9 +71,11 @@ for i in range(N):
   <div class="row"><input id="morph" type="range" min="0" max="1000" value="0"></div>
   <label><input id="hull" type="checkbox" checked> show convex hull</label>
   <label><input id="snd" type="checkbox" checked> sound while playing</label>
+  <label><input id="deps" type="checkbox" checked> show dependences</label>
+  <label><input id="prune" type="checkbox"> prune transitive edges</label>
 </aside>
 <div id="split"></div>
-<div id="view"><div id="tip"></div><div id="legend"><span>early</span><i></i><span>late</span></div></div>
+<div id="view"><div id="tip"></div><div id="legend"><span>early</span><i></i><span>late</span><span id="deplegend"></span></div></div>
 
 <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
 <script type="module">
@@ -89,7 +95,7 @@ scene.add(new THREE.AmbientLight(0xffffff, 1.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(3, 5, 4); scene.add(sun);
 
 const C_EARLY = new THREE.Color(), C_LATE = new THREE.Color(), C_FUTURE = new THREE.Color();
-let data = null, pts = null, hullMesh = null, hullEdges = null, axes = null, labels = [];
+let data = null, pts = null, hullMesh = null, hullEdges = null, depLines = null, axes = null, labels = [];
 const _m = new THREE.Matrix4(), _c = new THREE.Color();
 
 // theme: CSS vars are the single source of truth; three.js pulls from them on (re)build
@@ -127,8 +133,8 @@ function textSprite(txt, pos) {
 }
 
 function clear() {
-  for (const o of [pts, hullMesh, hullEdges, axes, ...labels]) if (o) scene.remove(o);
-  pts = hullMesh = hullEdges = axes = null; labels = [];
+  for (const o of [pts, hullMesh, hullEdges, depLines, axes, ...labels]) if (o) scene.remove(o);
+  pts = hullMesh = hullEdges = depLines = axes = null; labels = [];
 }
 
 // position of point i at the current morph value
@@ -151,6 +157,11 @@ function build(d) {
   hullMesh = new THREE.Mesh(new THREE.BufferGeometry(), hm); scene.add(hullMesh);
   hullEdges = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: cssVar('--hull-edge'), transparent: true, opacity: .6 })); scene.add(hullEdges);
 
+  depLines = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: .9 })); scene.add(depLines);
+
+  // legality: edge s->d holds under theta iff theta(s) <lex theta(d); without a schedule, source order is the schedule
+  const lex = (a, b) => { for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return a[k] < b[k]; return false; };
+  d.edges.forEach(e => e.bad = d.sched ? !lex(d.sched[e[0]], d.sched[e[1]]) : false);
   const ext = Math.max(1, ...d.points.flat(), ...(d.sched ? d.sched.flat() : []));
   axes = new THREE.AxesHelper(ext + 1); const ax = cssVar('--axis'); axes.setColors(ax, ax, ax); scene.add(axes);
   d.names.slice(0, 3).forEach((nm, k) => {
@@ -183,6 +194,21 @@ function update() {
   hullMesh.geometry.dispose(); hullMesh.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(tri, 3)); hullMesh.geometry.computeVertexNormals();
   hullEdges.geometry.dispose(); hullEdges.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(seg, 3));
   hullMesh.visible = hullEdges.visible = $('hull').checked;
+
+  // dependence edges, colored by kind (violated = red); fade those whose destination hasn't executed yet
+  const show = data.edges.filter(e => !($('prune').checked && e[3]));
+  const col = { RAW: new THREE.Color(cssVar('--raw')), WAR: new THREE.Color(cssVar('--war')), WAW: new THREE.Color(cssVar('--waw')) }, bad = new THREE.Color(cssVar('--bad')), surf = new THREE.Color(cssVar('--surface'));
+  const ep = new Float32Array(show.length * 6), ec = new Float32Array(show.length * 6), q = new THREE.Vector3();
+  show.forEach((e, k) => {
+    posAt(e[0], m, v); posAt(e[1], m, q); ep.set([v.x, v.y, v.z, q.x, q.y, q.z], k * 6);
+    _c.copy(e.bad ? bad : col[e[2]]); if (e[1] >= t) _c.lerp(surf, .75);
+    ec.set([_c.r, _c.g, _c.b, _c.r, _c.g, _c.b], k * 6);
+  });
+  depLines.geometry.dispose(); depLines.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(ep, 3)).setAttribute('color', new THREE.BufferAttribute(ec, 3));
+  depLines.visible = $('deps').checked && show.length > 0;
+  const nbad = show.filter(e => e.bad).length, cnt = k => show.filter(e => e[2] === k).length;
+  $('deplegend').innerHTML = !show.length ? '' : ['RAW', 'WAR', 'WAW'].filter(cnt).map(k => `<b style="background:var(--${k.toLowerCase()})"></b>${k} ${cnt(k)}`).join('')
+    + (nbad ? `<b style="background:var(--bad)"></b>⚠ ${nbad} violated` : '');
 }
 
 // hover tooltip
@@ -250,7 +276,7 @@ async function run() {
   if (!d.error) build(d);
 }
 for (const id of ['code', 'sched']) $(id).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 400); });
-$('morph').addEventListener('input', update);
+for (const id of ['morph', 'deps', 'prune']) $(id).addEventListener(id === 'morph' ? 'input' : 'change', update);
 $('t').addEventListener('input', e => { update(); blip(+e.target.value / +e.target.max); });
 $('hull').addEventListener('change', update);  // some browsers don't fire `input` on checkboxes
 
