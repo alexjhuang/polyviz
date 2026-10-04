@@ -9,3 +9,5 @@ pip install numpy scipy
 python app.py          # http://localhost:8765
 python app.py --check  # self-test
 ```
+
+Also runs fully in-browser via Pyodide when served statically (GitHub Pages).

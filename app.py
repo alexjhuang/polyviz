@@ -11,7 +11,7 @@ import numpy as np
 from scipy.spatial import ConvexHull
 
 MAX_POINTS = 20000
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(globals().get("__file__", "app.py")))  # no __file__ under Pyodide
 
 
 def instrument(code):

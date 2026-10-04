@@ -173,9 +173,31 @@ $('code').addEventListener('keydown', e => {
 
 // live re-run (debounced)
 let timer;
+// compute via the local Python server if present; otherwise (static hosting, e.g. GitHub Pages)
+// run app.py itself in the browser with Pyodide — same code, no second implementation
+let py;
+async function compute(code, schedule) {
+  if (!py) {
+    const res = await fetch('run', { method: 'POST', body: JSON.stringify({ code, schedule }) }).catch(() => null);
+    if (res && res.ok) return res.json();
+    $('stats').textContent = 'loading Python runtime (first visit ~15 MB)…';
+    py = (async () => {
+      const { loadPyodide } = await import('https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs');
+      const p = await loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/' });
+      await p.loadPackage(['numpy', 'scipy']);
+      p.runPython('__name__ = "app"\n' + await (await fetch('app.py')).text());  // skip the __main__ server start p.runPython('import json');
+      return p;
+    })();
+  }
+  let p;
+  try { p = await py; } catch (e) { py = null; return { error: 'Python runtime failed to load: ' + e.message }; }
+  p.globals.set('_code', code); p.globals.set('_schedule', schedule);
+  try { return JSON.parse(p.runPython('json.dumps(run(_code, _schedule))')); }
+  catch (e) { return { error: e.message.trim().split('\n').pop() }; }
+}
+
 async function run() {
-  const res = await fetch('/run', { method: 'POST', body: JSON.stringify({ code: $('code').value, schedule: $('sched').value }) });
-  const d = await res.json();
+  const d = await compute($('code').value, $('sched').value);
   $('err').textContent = d.error || '';
   if (!d.error) build(d);
 }
