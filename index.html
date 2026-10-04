@@ -1,0 +1,212 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>polyviz — loop nest → polyhedron</title>
+<style>
+  :root {
+    --surface: #fcfcfb; --page: #f9f9f7; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --border: rgba(11,11,11,.10); --accent: #2a78d6; --critical: #d03b3b;
+  }
+  html, body { margin: 0; height: 100%; font: 14px system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--page); }
+  body { display: grid; grid-template-columns: auto 6px 1fr; }
+  #split { cursor: col-resize; background: var(--grid); }
+  #split:hover, #split.on { background: var(--accent); }
+  aside { box-sizing: border-box; width: 480px; min-width: 260px; max-width: 70vw; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; border-right: 1px solid var(--grid); background: var(--surface); }
+  h1 { font-size: 15px; margin: 0; }
+  label { color: var(--ink-2); font-size: 12px; }
+  textarea, input[type=text] { width: 100%; box-sizing: border-box; font: 13px ui-monospace, Menlo, monospace; border: 1px solid var(--border); border-radius: 4px; padding: 8px; background: var(--surface); color: var(--ink); }
+  textarea { height: 220px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input[type=range] { flex: 1; }
+  button { font: inherit; padding: 4px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); cursor: pointer; }
+  #err { color: var(--critical); font: 12px ui-monospace, monospace; white-space: pre-wrap; min-height: 1.2em; }
+  #stats { color: var(--muted); font-size: 12px; }
+  #view { position: relative; }
+  canvas { display: block; }
+  #tip { position: absolute; pointer-events: none; display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font: 12px ui-monospace, monospace; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  #legend { position: absolute; left: 12px; bottom: 12px; color: var(--ink-2); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  #legend i { width: 80px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #cde2fb, #0d366b); display: inline-block; }
+</style>
+<aside>
+  <h1>polyviz</h1>
+  <label>Python loop nest (innermost body is replaced by a point record)</label>
+  <textarea id="code" spellcheck="false">N = 8
+for i in range(N):
+    for j in range(i, N):
+        for k in range(j - i + 1):
+            pass</textarea>
+  <label>Schedule θ(iters) — comma-separated affine exprs, optional</label>
+  <input id="sched" type="text" placeholder="e.g.  i, i + j, k" spellcheck="false">
+  <div id="err"></div>
+  <div id="stats"></div>
+  <label>Execution time (lexicographic order of the original nest)</label>
+  <div class="row"><button id="play">▶</button><input id="t" type="range" min="0" max="0" value="0"></div>
+  <label>Morph: original domain → scheduled domain</label>
+  <div class="row"><input id="morph" type="range" min="0" max="1000" value="0"></div>
+  <label><input id="hull" type="checkbox" checked> show convex hull</label>
+  <label><input id="snd" type="checkbox" checked> sound while playing</label>
+</aside>
+<div id="split"></div>
+<div id="view"><div id="tip"></div><div id="legend"><span>early</span><i></i><span>late</span></div></div>
+
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const $ = id => document.getElementById(id);
+const view = $('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#fcfcfb');
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+const controls = new OrbitControls(camera, renderer.domElement);
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(3, 5, 4); scene.add(sun);
+
+const C_EARLY = new THREE.Color('#cde2fb'), C_LATE = new THREE.Color('#0d366b'), C_FUTURE = new THREE.Color('#e1e0d9');
+let data = null, pts = null, hullMesh = null, hullEdges = null, axes = null, labels = [];
+const _m = new THREE.Matrix4(), _c = new THREE.Color();
+
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(view); resize();
+
+// full-height splitter: drag anywhere on the edge to resize the panel
+const split = $('split'), aside = document.querySelector('aside');
+split.addEventListener('pointerdown', e => { split.setPointerCapture(e.pointerId); split.classList.add('on'); });
+split.addEventListener('pointermove', e => { if (split.classList.contains('on')) aside.style.width = e.clientX + 'px'; });
+split.addEventListener('pointerup', () => split.classList.remove('on'));
+
+function textSprite(txt, pos) {
+  const cv = document.createElement('canvas'); cv.width = 128; cv.height = 64;
+  const g = cv.getContext('2d'); g.font = '40px system-ui'; g.fillStyle = '#52514e'; g.textAlign = 'center'; g.fillText(txt, 64, 48);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), depthTest: false }));
+  s.scale.set(1.2, 0.6, 1); s.position.copy(pos); return s;
+}
+
+function clear() {
+  for (const o of [pts, hullMesh, hullEdges, axes, ...labels]) if (o) scene.remove(o);
+  pts = hullMesh = hullEdges = axes = null; labels = [];
+}
+
+// position of point i at the current morph value
+function posAt(i, m, out) {
+  const a = data.points[i], b = data.sched ? data.sched[i] : a;
+  return out.set(a[0] + (b[0] - a[0]) * m, a[1] + (b[1] - a[1]) * m, a[2] + (b[2] - a[2]) * m);
+}
+
+function build(d) {
+  clear(); data = d;
+  const n = d.points.length;
+  $('t').max = n; $('t').value = n;
+  $('stats').textContent = `${n} iterations · dims (${d.names.join(', ')})${d.sched ? ' · schedule applied' : ''}`;
+
+  pts = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 12, 8), new THREE.MeshStandardMaterial({ roughness: .6 }), n);
+  scene.add(pts);
+
+  const hm = new THREE.MeshStandardMaterial({ color: '#2a78d6', transparent: true, opacity: .14, side: THREE.DoubleSide, depthWrite: false });
+  hullMesh = new THREE.Mesh(new THREE.BufferGeometry(), hm); scene.add(hullMesh);
+  hullEdges = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#1c5cab', transparent: true, opacity: .6 })); scene.add(hullEdges);
+
+  const ext = Math.max(1, ...d.points.flat(), ...(d.sched ? d.sched.flat() : []));
+  axes = new THREE.AxesHelper(ext + 1); axes.setColors('#c3c2b7', '#c3c2b7', '#c3c2b7'); scene.add(axes);
+  d.names.slice(0, 3).forEach((nm, k) => {
+    const p = new THREE.Vector3(); p.setComponent(k, ext + 1.6); labels.push(textSprite(nm, p)); scene.add(labels.at(-1));
+  });
+  if (!camera.userData.placed) { camera.position.set(ext * 1.6, ext * 1.3, ext * 2.2); controls.target.set(ext / 2, ext / 2, ext / 2); camera.userData.placed = true; }
+  update();
+}
+
+function update() {
+  if (!data) return;
+  const n = data.points.length, t = +$('t').value, m = +$('morph').value / 1000, v = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    posAt(i, m, v);
+    const done = i < t;
+    _m.makeScale(done ? 1 : .45, done ? 1 : .45, done ? 1 : .45).setPosition(v);
+    pts.setMatrixAt(i, _m);
+    pts.setColorAt(i, done ? _c.copy(C_EARLY).lerp(C_LATE, n > 1 ? i / (n - 1) : 0) : _c.copy(C_FUTURE));
+  }
+  pts.instanceMatrix.needsUpdate = true; pts.instanceColor.needsUpdate = true;
+
+  // hull: faces of whichever domain the morph is closer to, vertices morphed
+  const faces = (m < .5 ? data.faces : data.sched_faces) || [];
+  const tri = new Float32Array(faces.length * 9), seg = new Float32Array(faces.length * 18);
+  faces.forEach((f, k) => f.forEach((idx, j) => {
+    posAt(idx, m, v); tri.set([v.x, v.y, v.z], k * 9 + j * 3);
+    const q = posAt(f[(j + 1) % 3], m, new THREE.Vector3());
+    seg.set([v.x, v.y, v.z, q.x, q.y, q.z], k * 18 + j * 6);
+  }));
+  hullMesh.geometry.dispose(); hullMesh.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(tri, 3)); hullMesh.geometry.computeVertexNormals();
+  hullEdges.geometry.dispose(); hullEdges.geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(seg, 3));
+  hullMesh.visible = hullEdges.visible = $('hull').checked;
+}
+
+// hover tooltip
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+renderer.domElement.addEventListener('pointermove', e => {
+  if (!pts) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObject(pts)[0], tip = $('tip');
+  if (!hit) { tip.style.display = 'none'; return; }
+  const i = hit.instanceId, p = data.points[i].slice(0, data.names.length);
+  tip.style.display = 'block'; tip.style.left = (e.clientX - r.left + 12) + 'px'; tip.style.top = (e.clientY - r.top + 12) + 'px';
+  tip.textContent = `(${data.names.join(', ')}) = (${p.join(', ')})  t=${i}` + (data.sched ? `  θ=(${data.sched[i].slice(0, data.names.length).join(', ')})` : '');
+});
+
+// editor niceties: Tab inserts 4 spaces, Enter keeps (and after ':' grows) the indent
+$('code').addEventListener('keydown', e => {
+  const ta = e.target;
+  if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); ta.setRangeText('    ', ta.selectionStart, ta.selectionEnd, 'end'); }
+  else if (e.key === 'Enter') {
+    const line = ta.value.slice(0, ta.selectionStart).split('\n').pop();
+    e.preventDefault(); ta.setRangeText('\n' + line.match(/^\s*/)[0] + (line.trimEnd().endsWith(':') ? '    ' : ''), ta.selectionStart, ta.selectionEnd, 'end');
+  } else return;
+  ta.dispatchEvent(new Event('input'));
+});
+
+// live re-run (debounced)
+let timer;
+async function run() {
+  const res = await fetch('/run', { method: 'POST', body: JSON.stringify({ code: $('code').value, schedule: $('sched').value }) });
+  const d = await res.json();
+  $('err').textContent = d.error || '';
+  if (!d.error) build(d);
+}
+for (const id of ['code', 'sched']) $(id).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 400); });
+$('morph').addEventListener('input', update);
+$('t').addEventListener('input', e => { update(); blip(+e.target.value / +e.target.max); });
+$('hull').addEventListener('change', update);  // some browsers don't fire `input` on checkboxes
+
+// Web Audio blip per frame while playing: pitch rises with progress (no audio files)
+let ac;
+function blip(progress) {
+  if (!$('snd').checked) return;
+  (ac ??= new AudioContext()).resume();  // called from a user gesture (click / slider input): autoplay policy
+  const o = ac.createOscillator(), g = ac.createGain(), t0 = ac.currentTime;
+  o.type = 'triangle'; o.frequency.value = 220 * 2 ** (progress * 3);  // 3 octaves across the run
+  g.gain.setValueAtTime(0.12, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.08);
+  o.connect(g).connect(ac.destination); o.start(t0); o.stop(t0 + 0.08);
+}
+
+let playing = false;
+$('play').onclick = () => {
+  playing = !playing; $('play').textContent = playing ? '❚❚' : '▶'; if (playing && +$('t').value >= +$('t').max) $('t').value = 0; };
+(function loop() {
+  requestAnimationFrame(loop);
+  if (playing && data) {
+    const t = $('t'); t.value = Math.min(+t.max, +t.value + Math.max(1, Math.round(+t.max / 300)));
+    blip(+t.value / +t.max);
+    if (+t.value >= +t.max) { playing = false; $('play').textContent = '▶'; }
+    update();
+  }
+  controls.update(); renderer.render(scene, camera);
+})();
+run();
+</script>
